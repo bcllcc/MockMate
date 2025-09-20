@@ -1,0 +1,31 @@
+# Environment variables
+backend/.env
+
+# Database files
+backend/mockmate.db
+
+# Temporary files
+backend/tmp_*
+
+# Log files
+logs/
+
+# Build files
+frontend/.next/
+frontend/tsconfig.tsbuildinfo
+
+# Dependencies
+frontend/node_modules/
+backend/__pycache__/
+backend/.pytest_cache/
+
+# IDE and tools
+.claude/
+.serena/
+.claude_config
+INITIAL.md
+MOCKMATE_FEATURES.md
+
+# OS generated files
+.DS_Store
+Thumbs.db

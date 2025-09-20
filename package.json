@@ -1,0 +1,21 @@
+{
+  "name": "mockmate",
+  "version": "1.0.0",
+  "description": "AI-powered interview simulator",
+  "scripts": {
+    "dev": "concurrently \"npm run backend\" \"npm run frontend\"",
+    "backend": "cd backend && uvicorn main:app --reload --port 8000 --app-dir .",
+    "frontend": "cd frontend && npm run dev",
+    "install:backend": "cd backend && pip install -r requirements.txt",
+    "install:frontend": "cd frontend && npm install",
+    "setup": "npm run install:backend && npm run install:frontend"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/MockMate.git"
+  },
+  "license": "MIT"
+}
