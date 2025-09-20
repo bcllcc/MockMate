@@ -10,11 +10,8 @@ import { useUser } from "@/contexts/UserContext";
 import {
   endInterview,
   sendInterviewAnswer,
-  sendInterviewAnswerStream,
   startInterview,
   type InterviewFeedback,
-  type InterviewPrompt,
-  type InterviewResponse,
   type ResumeParseResponse,
 } from "@/lib/api";
 
@@ -28,7 +25,7 @@ export default function HomePage() {
   const [interviewerStyle, setInterviewerStyle] = useState<string>("technical");
   const [questionCount, setQuestionCount] = useState<number>(6);
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [currentPrompt, setCurrentPrompt] = useState<InterviewPrompt | null>(null);
+  const [currentQuestion, setCurrentQuestion] = useState<string | null>(null);
   const [history, setHistory] = useState<ConversationEntry[]>([]);
   const [feedback, setFeedback] = useState<InterviewFeedback | null>(null);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
@@ -51,7 +48,7 @@ export default function HomePage() {
     setResumeFileName(filename);
     setHistory([]);
     setFeedback(null);
-    setCurrentPrompt(null);
+    setCurrentQuestion(null);
     setSessionId(null);
     setErrorMessage(null);
   };
@@ -69,16 +66,15 @@ export default function HomePage() {
     setErrorMessage(null);
     try {
       const response = await startInterview({
+        user_id: userId,
         resume_summary: resume.summary.summary,
         job_description: jobDescription,
         interviewer_style: interviewerStyle,
         question_count: questionCount,
-        user_id: userId,
-        user_name: profile.name || profile.email || undefined,
         language,
       });
       setSessionId(response.session_id);
-      setCurrentPrompt(response.prompt);
+      setCurrentQuestion(response.prompt ?? null);
       setHistory([]);
       setFeedback(null);
     } catch (error) {
@@ -90,7 +86,7 @@ export default function HomePage() {
   };
 
 const handleAnswerSubmit = async (answer: string) => {
-  if (!sessionId || !currentPrompt) {
+  if (!sessionId || !currentQuestion) {
     return;
   }
   setIsProcessing(true);
@@ -104,18 +100,16 @@ const handleAnswerSubmit = async (answer: string) => {
       ...prev,
       {
         role: "interviewer",
-        content: currentPrompt.text,
-        topic: currentPrompt.topic,
-        type: currentPrompt.type,
+        content: currentQuestion,
       },
       { role: "candidate", content: answer },
     ]);
     if (response.completed) {
       setFeedback(response.feedback ?? null);
       setSessionId(null);
-      setCurrentPrompt(null);
-    } else if (response.prompt) {
-      setCurrentPrompt(response.prompt);
+      setCurrentQuestion(null);
+    } else {
+      setCurrentQuestion(response.prompt ?? null);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : t("home.errors.answerFailed");
@@ -125,75 +119,6 @@ const handleAnswerSubmit = async (answer: string) => {
   }
 };
 
-const handleAnswerSubmitStream = async ({
-  answer,
-  onChunk,
-  onComplete,
-  onError,
-}: {
-  answer: string;
-  onChunk: (content: string) => void;
-  onComplete: (response: InterviewResponse) => void;
-  onError: (error: Error) => void;
-}): Promise<(() => void) | void> => {
-  if (!sessionId || !currentPrompt) {
-    onError(new Error("Session is not active"));
-    setIsProcessing(false);
-    return;
-  }
-
-  setIsProcessing(true);
-  setErrorMessage(null);
-  const activePrompt = currentPrompt;
-
-  try {
-    const cancel = sendInterviewAnswerStream(
-      {
-        session_id: sessionId,
-        answer,
-      },
-      {
-        onChunk: (chunk) => {
-          onChunk(chunk);
-        },
-        onComplete: (response) => {
-          setHistory((prev) => [
-            ...prev,
-            {
-              role: "interviewer",
-              content: activePrompt.text,
-              topic: activePrompt.topic,
-              type: activePrompt.type,
-            },
-            { role: "candidate", content: answer },
-          ]);
-
-          if (response.completed) {
-            setFeedback(response.feedback ?? null);
-            setCurrentPrompt(null);
-            setSessionId(null);
-          } else if (response.prompt) {
-            setCurrentPrompt(response.prompt);
-          }
-
-          setIsProcessing(false);
-          onComplete(response);
-        },
-        onError: (error) => {
-          setIsProcessing(false);
-          setErrorMessage(error.message);
-          onError(error);
-        },
-      },
-    );
-    return cancel;
-  } catch (error) {
-    setIsProcessing(false);
-    const err = error instanceof Error ? error : new Error(String(error));
-    setErrorMessage(err.message);
-    onError(err);
-  }
-};
 
   const handleFinishEarly = async () => {
     if (!sessionId) {
@@ -205,7 +130,7 @@ const handleAnswerSubmitStream = async ({
       const response = await endInterview(sessionId);
       setFeedback(response.feedback ?? null);
       setSessionId(null);
-      setCurrentPrompt(null);
+      setCurrentQuestion(null);
     } catch (error) {
       const message = error instanceof Error ? error.message : t("home.errors.endFailed");
       setErrorMessage(message || t("home.errors.endFailed"));
@@ -216,7 +141,7 @@ const handleAnswerSubmitStream = async ({
 
   const handleReset = () => {
     setSessionId(null);
-    setCurrentPrompt(null);
+    setCurrentQuestion(null);
     setHistory([]);
     setFeedback(null);
     setIsProcessing(false);
@@ -312,11 +237,10 @@ const handleAnswerSubmitStream = async ({
 
         <InterviewConsole
           sessionId={sessionId}
-          currentPrompt={currentPrompt}
+          currentQuestion={currentQuestion}
           history={history}
           feedback={feedback}
           onSubmit={handleAnswerSubmit}
-          onSubmitStream={handleAnswerSubmitStream}
           onFinishEarly={handleFinishEarly}
           processing={isProcessing}
         />
@@ -324,5 +248,9 @@ const handleAnswerSubmitStream = async ({
     </main>
   );
 }
+
+
+
+
 
 

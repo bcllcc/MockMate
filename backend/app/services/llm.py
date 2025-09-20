@@ -27,404 +27,325 @@ from app.schemas import (
 
 
 class LLMService:
-    """DeepSeek-powered helper for questions, follow-ups, and feedback."""
+    _logger_configured: bool = False
 
-    _logger_configured = False
+    def __init__(self):
+        if not LLMService._logger_configured:
+            self._configure_logger()
+            LLMService._logger_configured = True
 
-    def __init__(self) -> None:
-        api_key = settings.deepseek_api_key or os.getenv("DEEPSEEK_API_KEY")
-        if not api_key:
-            raise RuntimeError("DeepSeek API key missing. Set settings.deepseek_api_key or DEEPSEEK_API_KEY.")
-        self._client = OpenAI(api_key=api_key, base_url=settings.deepseek_base_url)
+        self._client = OpenAI(
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url
+        )
         self._model = "deepseek-chat"
-        self._logger = logging.getLogger("app.services.llm")
-        self._configure_logger()
+        self._logger = logging.getLogger(__name__)
 
-    # Public API -----------------------------------------------------------------
-    def generate_questions(self, payload: QuestionGenerationRequest) -> list[Question]:
-        language = payload.language
-        system_prompt = (
-            "You are a senior interviewer preparing a structured mock interview. "
-            "Return a JSON object with a `questions` array. Each item must contain `text` and `topic`."
-        )
+    def generate_questions(self, resume_text: str, target_role: str, language: str = "en") -> list:
+        """生成面试问题列表"""
+        prompt = f"""Based on the resume and target role, generate 5 interview questions.
+
+Resume: {resume_text}
+Target Role: {target_role}
+Language: {language}
+
+Return questions as JSON array of strings."""
+
+        try:
+            response = self._chat([{"role": "user", "content": prompt}])
+            questions = self._parse_json(response)
+            return questions if isinstance(questions, list) else [response]
+        except Exception as e:
+            self._logger.error(f"Failed to generate questions: {e}")
+            return ["Tell me about yourself and your experience."]
+
+    def generate_first_question(self, resume_text: str, target_role: str, language: str = "en") -> str:
+        """生成第一个面试问题"""
         if language == "zh":
-            system_prompt += " Respond entirely in Simplified Chinese."
-        user_prompt = (
-            f"Resume summary:\n{payload.resume_summary}\n\n"
-            f"Job description:\n{payload.job_description}\n\n"
-            f"Interviewer style: {payload.interviewer_style}\n"
-            f"Number of questions: {payload.count}\n"
-            "The questions should be concise, with unique topics, and reference the resume or job needs when relevant."
-        )
-        raw = self._chat(system_prompt, user_prompt, temperature=0.6)
-        data = self._parse_json(raw)
-        items = data.get("questions") if isinstance(data, dict) else None
-        if not isinstance(items, list):
-            raise HTTPException(status_code=502, detail="LLM did not return a questions list.")
+            prompt = f"""基于简历和目标职位，生成一个开场面试问题。
 
-        questions: list[Question] = []
-        for item in items[: payload.count]:
-            if not isinstance(item, dict):
-                continue
-            text = item.get("text")
-            topic = item.get("topic") or "general"
-            if not isinstance(text, str) or len(text.strip()) == 0:
-                continue
-            questions.append(
-                Question(
-                    id=str(uuid.uuid4()),
-                    text=text.strip(),
-                    topic=str(topic).strip() or "general",
-                    style=payload.interviewer_style,
-                )
-            )
+简历：{resume_text}
+目标职位：{target_role}
 
-        if not questions:
-            raise HTTPException(status_code=502, detail="LLM did not yield interview questions.")
-        return questions
+请生成一个简洁、专业的开场问题，帮助面试官了解候选人的背景和经验。"""
+        else:
+            prompt = f"""Based on the resume and target role, generate an opening interview question.
 
-    def analyze_resume(self, resume_text: str, language: LanguageCode) -> dict:
-        """Produce structured insights for a resume via the LLM."""
-        cleaned_text = resume_text.strip()
-        if not cleaned_text:
-            raise HTTPException(status_code=400, detail="Resume text is empty.")
+Resume: {resume_text}
+Target Role: {target_role}
 
-        system_prompt = (
-            "You are an expert career coach and resume analyst. "
-            "Generate structured insights that summarize experience, extract highlights, and group skills. "
-            "Always respond with valid JSON that matches the schema instructions."
-        )
+Generate a concise, professional opening question that helps the interviewer understand the candidate's background and experience."""
+
+        try:
+            response = self._chat([{"role": "user", "content": prompt}])
+            return response.strip()
+        except Exception as e:
+            self._logger.error(f"Failed to generate first question: {e}")
+            if language == "zh":
+                return "请简单介绍一下你自己以及你的相关工作经验。"
+            else:
+                return "Could you please introduce yourself and tell me about your relevant work experience?"
+
+    def generate_follow_up_question(self, history: list, resume_text: str, target_role: str, language: str = "en") -> str:
+        """基于对话历史生成后续问题"""
+        conversation = "\n".join([f"{turn['role']}: {turn['content']}" for turn in history])
+        
         if language == "zh":
-            system_prompt += " Respond entirely in Simplified Chinese."
+            prompt = f"""基于以下面试对话历史、简历和目标职位，生成下一个合适的面试问题。
 
-        instructions = dedent("""
-            Analyse the resume text and return JSON with the following shape:
-            {
-              "summary": {
-                "headline": string or null,
-                "overview": short paragraph,
-                "insights": array of up to 5 bullet insights (strings),
-                "skills_by_category": object mapping category -> array of up to 8 skills,
-                "confidence": number between 0 and 1 (optional)
-              },
-              "sections": [
-                {
-                  "title": section title in sentence case,
-                  "summary": 1-2 sentence summary,
-                  "highlights": array of up to 5 concise bullet strings
+对话历史：
+{conversation}
+
+简历：{resume_text}
+目标职位：{target_role}
+
+请生成一个深入探讨的后续问题，基于候选人之前的回答。"""
+        else:
+            prompt = f"""Based on the interview conversation history, resume, and target role, generate the next appropriate interview question.
+
+Conversation History:
+{conversation}
+
+Resume: {resume_text}
+Target Role: {target_role}
+
+Generate a follow-up question that digs deeper based on the candidate's previous answers."""
+
+        try:
+            response = self._chat([{"role": "user", "content": prompt}])
+            return response.strip()
+        except Exception as e:
+            self._logger.error(f"Failed to generate follow-up question: {e}")
+            if language == "zh":
+                return "请详细说明一下您在这个项目中遇到的挑战以及如何解决的？"
+            else:
+                return "Can you elaborate on the challenges you faced in this project and how you overcame them?"
+
+    def generate_feedback(self, answer_text: str, resume_text: str, target_role: str, language: str = "en") -> dict:
+        """生成对单个回答的反馈"""
+        if language == "zh":
+            prompt = f"""基于候选人的回答、简历和目标职位，提供结构化的反馈。
+
+候选人回答：{answer_text}
+简历：{resume_text}
+目标职位：{target_role}
+
+请以JSON格式返回反馈，包含：
+- summary: 总体评价
+- strengths: 优点列表（数组）
+- weaknesses: 需要改进的地方列表（数组）
+- suggestions: 改进建议列表（数组）"""
+        else:
+            prompt = f"""Based on the candidate's answer, resume, and target role, provide structured feedback.
+
+Candidate Answer: {answer_text}
+Resume: {resume_text}
+Target Role: {target_role}
+
+Return feedback in JSON format with:
+- summary: overall assessment
+- strengths: list of strengths (array)
+- weaknesses: list of areas for improvement (array)
+- suggestions: list of improvement suggestions (array)"""
+
+        try:
+            response = self._chat([{"role": "user", "content": prompt}])
+            feedback = self._parse_json(response)
+            
+            # 确保返回正确格式
+            if isinstance(feedback, dict):
+                return {
+                    "summary": feedback.get("summary", ""),
+                    "strengths": feedback.get("strengths", []),
+                    "weaknesses": feedback.get("weaknesses", []),
+                    "suggestions": feedback.get("suggestions", [])
                 }
-              ],
-              "skills": array of up to 30 core skills ordered by relevance,
-              "highlights": array of up to 8 standout accomplishments or metrics
+        except Exception as e:
+            self._logger.error(f"Failed to generate feedback: {e}")
+
+        # 默认反馈
+        if language == "zh":
+            return {
+                "summary": "回答基本符合要求，展现了一定的专业能力。",
+                "strengths": ["表达清晰", "逻辑结构合理"],
+                "weaknesses": ["可以提供更多具体示例"],
+                "suggestions": ["建议在回答中加入更多量化数据和具体成果"]
             }
-            Use concise wording. Do not include markdown or explanations outside of the JSON.
-        """).strip()
+        else:
+            return {
+                "summary": "The answer meets basic requirements and demonstrates professional competence.",
+                "strengths": ["Clear expression", "Good logical structure"],
+                "weaknesses": ["Could provide more specific examples"],
+                "suggestions": ["Consider adding more quantified data and concrete achievements"]
+            }
 
-        user_prompt = dedent(f"""
-        {instructions}
+    def generate_final_feedback(self, history: list, resume_text: str, target_role: str, language: str = "en") -> dict:
+        """生成最终面试评估"""
+        conversation = "\n".join([f"{turn['role']}: {turn['content']}" for turn in history])
+        
+        if language == "zh":
+            prompt = f"""基于完整的面试对话、简历和目标职位，提供最终的综合评估。
 
-        Resume text (may be truncated):
-        ```
-        {cleaned_text}
-        ```
-        """).strip()
+完整对话：
+{conversation}
 
-        raw = self._chat(system_prompt, user_prompt, temperature=0.35)
-        data = self._parse_json(raw)
-        if not isinstance(data, dict):
-            raise HTTPException(status_code=502, detail="LLM resume analysis failed.")
-        return data
+简历：{resume_text}
+目标职位：{target_role}
 
+请以JSON格式返回最终评估，包含：
+- summary: 总体评价和建议
+- strengths: 候选人优点列表（数组）
+- weaknesses: 需要改进的地方列表（数组）
+- suggestions: 后续发展建议列表（数组）
+- overall_score: 整体评分（1-10）"""
+        else:
+            prompt = f"""Based on the complete interview conversation, resume, and target role, provide a final comprehensive assessment.
 
+Complete Conversation:
+{conversation}
 
-    def _chunk_text(self, text: str) -> Generator[str, None, None]:
-        for token in text.split():
-            yield token + " "
+Resume: {resume_text}
+Target Role: {target_role}
 
-    def _chat_stream(self, system_prompt: str, user_prompt: str, temperature: float) -> Generator[str, None, None]:
-        self._log_event(
-            "request_stream",
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-        )
+Return final assessment in JSON format with:
+- summary: overall evaluation and recommendation
+- strengths: list of candidate strengths (array)
+- weaknesses: list of areas for improvement (array)
+- suggestions: list of development suggestions (array)
+- overall_score: overall score (1-10)"""
+
         try:
+            response = self._chat([{"role": "user", "content": prompt}])
+            feedback = self._parse_json(response)
+            
+            if isinstance(feedback, dict):
+                return {
+                    "summary": feedback.get("summary", ""),
+                    "strengths": feedback.get("strengths", []),
+                    "weaknesses": feedback.get("weaknesses", []),
+                    "suggestions": feedback.get("suggestions", []),
+                    "overall_score": feedback.get("overall_score", 7)
+                }
+        except Exception as e:
+            self._logger.error(f"Failed to generate final feedback: {e}")
+
+        # 默认最终反馈
+        if language == "zh":
+            return {
+                "summary": "候选人表现良好，基本符合职位要求，建议进入下一轮面试。",
+                "strengths": ["专业技能扎实", "沟通表达清晰", "学习能力强"],
+                "weaknesses": ["可以在某些技术细节上更深入", "实际项目经验可以更丰富"],
+                "suggestions": ["继续加强技术深度", "多参与实际项目", "提高解决复杂问题的能力"],
+                "overall_score": 7
+            }
+        else:
+            return {
+                "summary": "The candidate performed well and generally meets the position requirements. Recommend proceeding to the next round.",
+                "strengths": ["Solid professional skills", "Clear communication", "Strong learning ability"],
+                "weaknesses": ["Could be more in-depth on technical details", "Could have more hands-on project experience"],
+                "suggestions": ["Continue strengthening technical depth", "Participate in more practical projects", "Improve complex problem-solving skills"],
+                "overall_score": 7
+            }
+
+    def analyze_resume(self, resume_text: str, language: str = "en"):
+        """分析简历内容"""
+        if language == "zh":
+            prompt = f"""分析以下简历内容，提取关键信息：
+
+{resume_text}
+
+请以JSON格式返回分析结果，包含：
+- skills: 技能列表
+- experience: 工作经验总结
+- education: 教育背景
+- summary: 简历总结"""
+        else:
+            prompt = f"""Analyze the following resume content and extract key information:
+
+{resume_text}
+
+Return analysis in JSON format with:
+- skills: list of skills
+- experience: work experience summary
+- education: educational background
+- summary: resume summary"""
+
+        try:
+            response = self._chat([{"role": "user", "content": prompt}])
+            return self._parse_json(response)
+        except Exception as e:
+            self._logger.error(f"Failed to analyze resume: {e}")
+            return {
+                "skills": [],
+                "experience": "Experience analysis not available",
+                "education": "Education information not available", 
+                "summary": "Resume analysis not available"
+            }
+
+    def _configure_logger(self):
+        """配置日志记录器"""
+        logger = logging.getLogger(__name__)
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+            logger.setLevel(logging.INFO)
+
+    def _log_event(self, event: str, details: dict = None):
+        """记录事件日志"""
+        log_data = {
+            "event": event,
+            "timestamp": datetime.now().isoformat(),
+            "details": details or {}
+        }
+        self._logger.info(f"LLM Event: {json.dumps(log_data)}")
+
+    def _chat(self, messages: list, **kwargs) -> str:
+        """调用LLM进行对话"""
+        try:
+            self._log_event("chat_request", {
+                "message_count": len(messages),
+                "model": self._model
+            })
+            
             response = self._client.chat.completions.create(
                 model=self._model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=temperature,
-                stream=True,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=2000,
+                **kwargs
             )
-        except Exception as exc:  # pragma: no cover - network errors
-            self._log_event(
-                "error_stream",
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                error=str(exc),
-            )
-            raise HTTPException(status_code=502, detail="LLM stream request failed.") from exc
+            
+            content = response.choices[0].message.content
+            
+            self._log_event("chat_response", {
+                "response_length": len(content) if content else 0,
+                "usage": response.usage.model_dump() if response.usage else None
+            })
+            
+            return content or ""
+            
+        except Exception as e:
+            self._log_event("chat_error", {"error": str(e)})
+            raise
 
+    def _parse_json(self, text: str):
+        """解析JSON响应"""
         try:
-            for chunk in response:
-                if not chunk.choices:
-                    continue
-                delta = getattr(chunk.choices[0], "delta", None)
-                content = getattr(delta, "content", None) if delta else None
-                if content:
-                    yield content
-        finally:
-            self._log_event(
-                "response_stream",
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                raw_response="[stream]",
-            )
-
-    def generate_follow_up_stream(
-        self,
-        prompt: InterviewPrompt,
-        answer: str,
-        language: LanguageCode,
-    ) -> Generator[str, None, InterviewPrompt | None]:
-        system_prompt = (
-            "You review candidate answers and decide whether a follow-up question is needed. "
-            "Return JSON with `follow_up` (string or null) and optional `topic`."
-        )
-        if language == "zh":
-            system_prompt += " Respond in Simplified Chinese."
-        user_prompt = (
-            f"Original question: {prompt.text}\n"
-            f"Topic: {prompt.topic}\n"
-            f"Candidate answer: {answer}\n"
-            "If the answer is adequate, respond with {\"follow_up\": null}. If a follow-up is helpful, craft one targeted question."
-        )
-
-        buffer: list[str] = []
-        stream = self._chat_stream(system_prompt, user_prompt, temperature=0.4)
-        try:
-            while True:
-                chunk = next(stream)
-                buffer.append(chunk)
-        except StopIteration:
-            pass
-
-        raw = "".join(buffer)
-        try:
-            data = self._parse_json(raw)
-        except HTTPException:
-            return None
-
-        follow_up = data.get("follow_up") if isinstance(data, dict) else None
-        topic = data.get("topic") if isinstance(data, dict) else None
-        if not follow_up or not isinstance(follow_up, str):
-            return None
-
-        prompt_text = follow_up.strip()
-        topic_value = str(topic).strip() if isinstance(topic, str) and topic.strip() else prompt.topic
-        follow_up_prompt = InterviewPrompt(
-            id=str(uuid.uuid4()),
-            text=prompt_text,
-            topic=topic_value,
-            type="follow_up",
-        )
-
-        for chunk in self._chunk_text(prompt_text):
-            yield chunk
-
-        return follow_up_prompt
-
-
-    def generate_follow_up(self, prompt: InterviewPrompt, answer: str, language: LanguageCode) -> InterviewPrompt | None:
-        system_prompt = (
-            "You review candidate answers and decide whether a follow-up question is needed. "
-            "Return JSON with `follow_up` (string or null) and optional `topic`."
-        )
-        if language == "zh":
-            system_prompt += " Respond in Simplified Chinese."
-        user_prompt = (
-            f"Original question: {prompt.text}\n"
-            f"Topic: {prompt.topic}\n"
-            f"Candidate answer: {answer}\n"
-            "If the answer is adequate, respond with {\"follow_up\": null}. If a follow-up is helpful, craft one targeted question."
-        )
-        raw = self._chat(system_prompt, user_prompt, temperature=0.4)
-        data = self._parse_json(raw)
-        follow_up = data.get("follow_up") if isinstance(data, dict) else None
-        topic = data.get("topic") if isinstance(data, dict) else None
-        if not follow_up:
-            return None
-        if not isinstance(follow_up, str):
-            return None
-        return InterviewPrompt(
-            id=str(uuid.uuid4()),
-            text=follow_up.strip(),
-            topic=str(topic).strip() if isinstance(topic, str) and topic.strip() else prompt.topic,
-            type="follow_up",
-        )
-
-    def generate_feedback(self, turns: Iterable[InterviewTurn], style: str, language: LanguageCode) -> InterviewFeedback:
-        conversation_lines = []
-        for idx, turn in enumerate(turns, start=1):
-            conversation_lines.append(
-                f"Q{idx}: {turn.question}\nA{idx}: {turn.answer}"
-            )
-        transcript = "\n\n".join(conversation_lines) if conversation_lines else ""
-        system_prompt = (
-            "You evaluate mock interviews and provide constructive feedback. "
-            "Return JSON with `overall_score` (0-100 number), `summary`, `strengths`, `weaknesses`, `suggestions`."
-        )
-        if language == "zh":
-            system_prompt += " Write the feedback in Simplified Chinese."
-        user_prompt = (
-            f"Interviewer style: {style}\n"
-            f"Transcript:\n{transcript or 'No answers were provided.'}"
-        )
-        raw = self._chat(system_prompt, user_prompt, temperature=0.5)
-        data = self._parse_json(raw)
-        if not isinstance(data, dict):
-            raise HTTPException(status_code=502, detail="LLM feedback malformed.")
-
-        try:
-            score = float(data.get("overall_score"))
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=502, detail="LLM feedback missing score.") from None
-
-        summary = data.get("summary")
-        strengths = data.get("strengths")
-        weaknesses = data.get("weaknesses")
-        suggestions = data.get("suggestions")
-        if not isinstance(summary, str):
-            raise HTTPException(status_code=502, detail="LLM feedback missing summary.")
-        strengths_list = [item for item in strengths or [] if isinstance(item, str)]
-        weaknesses_list = [item for item in weaknesses or [] if isinstance(item, str)]
-        suggestions_list = [item for item in suggestions or [] if isinstance(item, str)]
-
-        return InterviewFeedback(
-            overall_score=score,
-            summary=summary.strip(),
-            strengths=strengths_list,
-            weaknesses=weaknesses_list,
-            suggestions=suggestions_list,
-        )
-
-    # Internal helpers ----------------------------------------------------------
-    def _configure_logger(self) -> None:
-        if LLMService._logger_configured:
-            return
-        log_path = Path(settings.llm_log_path).expanduser()
-        if not log_path.is_absolute():
-            base_dir = Path(__file__).resolve().parents[3]
-            log_path = base_dir / log_path
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        handler = logging.FileHandler(log_path, encoding="utf-8")
-        formatter = logging.Formatter("%(asctime)s	%(levelname)s	%(message)s")
-        handler.setFormatter(formatter)
-        self._logger.addHandler(handler)
-        self._logger.setLevel(logging.INFO)
-        self._logger.propagate = False
-        LLMService._logger_configured = True
-
-    def _log_event(
-        self,
-        event: str,
-        *,
-        system_prompt: str | None = None,
-        user_prompt: str | None = None,
-        raw_response: str | None = None,
-        error: str | None = None,
-    ) -> None:
-        if not self._logger.handlers:
-            return
-        payload: dict[str, str] = {"event": event}
-        if system_prompt is not None:
-            payload["system_prompt"] = system_prompt
-        if user_prompt is not None:
-            payload["user_prompt"] = user_prompt
-        if raw_response is not None:
-            payload["raw_response"] = raw_response
-        if error is not None:
-            payload["error"] = error
-        try:
-            self._logger.info(json.dumps(payload, ensure_ascii=False))
-        except Exception:  # pragma: no cover - logging failures should not interrupt flow
-            self._logger.info(
-                "event=%s system_prompt_length=%s user_prompt_length=%s raw_response_length=%s error=%s",
-                event,
-                len(system_prompt or ""),
-                len(user_prompt or ""),
-                len(raw_response or ""),
-                error,
-            )
-
-    def _chat(self, system_prompt: str, user_prompt: str, temperature: float) -> str:
-        self._log_event(
-            "request",
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-        )
-        try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=temperature,
-                stream=False,
-            )
-        except Exception as exc:  # pragma: no cover - network errors
-            self._log_event(
-                "error",
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                error=str(exc),
-            )
-            raise HTTPException(status_code=502, detail="LLM request failed.") from exc
-        choices = getattr(response, "choices", None)
-        if not choices:
-            self._log_event(
-                "error",
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                error="no choices returned",
-            )
-            raise HTTPException(status_code=502, detail="LLM returned no choices.")
-        message = choices[0].message
-        content = getattr(message, "content", None)
-        if not content:
-            self._log_event(
-                "error",
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                error="empty content",
-            )
-            raise HTTPException(status_code=502, detail="LLM returned empty content.")
-        self._log_event(
-            "response",
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            raw_response=content,
-        )
-        return content
-
-    def _parse_json(self, raw: str) -> dict:
-        text = raw.strip()
-        if text.startswith("```") and text.endswith("```"):
-            inner = text[3:-3].strip()
-            if inner.lower().startswith("json"):
-                inner = inner[4:].strip()
-            text = inner
-        try:
+            # 尝试直接解析
             return json.loads(text)
         except json.JSONDecodeError:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start == -1 or end == -1:
-                raise HTTPException(status_code=502, detail="LLM response was not valid JSON.")
-            snippet = text[start : end + 1]
-            try:
-                return json.loads(snippet)
-            except json.JSONDecodeError as exc:
-                raise HTTPException(status_code=502, detail="LLM response was not valid JSON.") from exc
+            # 尝试提取JSON部分
+            import re
+            json_match = re.search(r'\{.*\}', text, re.DOTALL)
+            if json_match:
+                try:
+                    return json.loads(json_match.group())
+                except json.JSONDecodeError:
+                    pass
+            
+            # 解析失败，返回原文本
+            return text

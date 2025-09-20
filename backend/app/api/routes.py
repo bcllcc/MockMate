@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
-from fastapi.responses import StreamingResponse
 
 from app.core.database import SessionLocal
 from app.schemas import (
@@ -46,54 +45,53 @@ async def upload_resume(file: UploadFile = File(...)) -> ResumeParseResponse:
 
 @router.post("/questions/generate", response_model=QuestionGenerationResponse)
 def generate_questions(payload: QuestionGenerationRequest) -> QuestionGenerationResponse:
-    questions = _llm_service.generate_questions(payload)
+    questions = _llm_service.generate_questions(
+        payload.resume_summary,
+        payload.job_description,
+        payload.language
+    )
     return QuestionGenerationResponse(questions=questions)
 
 
 @router.post("/interview/start", response_model=InterviewStartResponse)
 def start_interview(payload: InterviewStartRequest) -> InterviewStartResponse:
-    return _interview_manager.start(payload)
+    result = _interview_manager.start(
+        user_id=payload.user_id,
+        resume_summary=payload.resume_summary,
+        job_description=payload.job_description,
+        language=payload.language,
+        interviewer_style=payload.interviewer_style,
+        question_count=payload.question_count,
+    )
+    return InterviewStartResponse(
+        session_id=result["session_id"],
+        prompt=result["prompt"]
+    )
 
 
 @router.post("/interview/respond", response_model=InterviewResponse)
 def respond_interview(payload: InterviewResponseRequest) -> InterviewResponse:
-    return _interview_manager.answer(payload)
-
-
-@router.post("/interview/respond-stream")
-def respond_interview_stream(payload: InterviewResponseRequest) -> StreamingResponse:
-    """Stream version of interview response for real-time output."""
-
-    stream = _interview_manager.answer_stream(payload)
-
-    def generate():
-        try:
-            while True:
-                chunk = next(stream)
-                data = json.dumps({"content": chunk})
-                yield "data: " + data + "\n\n"
-        except StopIteration as stop:
-            response = stop.value
-            payload = {
-                "completed": response.completed,
-                "response": response.model_dump(),
-            }
-            yield "data: " + json.dumps(payload) + "\n\n"
-
-    return StreamingResponse(
-        generate(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-        },
+    result = _interview_manager.answer(
+        session_id=payload.session_id,
+        answer_text=payload.answer,
+        elapsed_seconds=payload.elapsed_seconds,
     )
+    return InterviewResponse(
+        completed=result["completed"],
+        prompt=result.get("prompt"),
+        feedback=result.get("feedback"),
+    )
+
+
 
 
 @router.post("/interview/end", response_model=InterviewResponse)
 def end_interview(payload: InterviewEndRequest) -> InterviewResponse:
-    feedback = _interview_manager.end(payload.session_id)
-    return InterviewResponse(completed=True, feedback=feedback)
+    result = _interview_manager.end(payload.session_id)
+    return InterviewResponse(
+        completed=True,
+        feedback=result["final_feedback"]
+    )
 
 
 @router.get("/interview/history", response_model=list[InterviewHistoryItem])

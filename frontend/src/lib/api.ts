@@ -17,13 +17,6 @@ export type ResumeParseResponse = {
   analysis_origin?: string | null;
 };
 
-export type InterviewPrompt = {
-  id: string;
-  text: string;
-  topic: string;
-  type: "main" | "follow_up";
-};
-
 export type InterviewFeedback = {
   overall_score: number;
   summary: string;
@@ -34,7 +27,7 @@ export type InterviewFeedback = {
 
 export type InterviewResponse = {
   completed: boolean;
-  prompt?: InterviewPrompt | null;
+  prompt?: string | null;
   feedback?: InterviewFeedback | null;
 };
 
@@ -74,6 +67,41 @@ export type InterviewSessionDetail = {
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api";
 
+type PromptPayload = string | { text?: unknown } | null | undefined;
+
+type StartInterviewPayload = {
+  user_id: string;
+  resume_summary: string;
+  job_description: string;
+  interviewer_style: string;
+  question_count: number;
+  language: LanguageCode;
+};
+
+type StartInterviewResponse = {
+  session_id: string;
+  prompt: PromptPayload;
+};
+
+type RawInterviewResponse = {
+  completed: boolean;
+  prompt?: PromptPayload;
+  feedback?: InterviewFeedback | null;
+};
+
+function extractPromptText(prompt: PromptPayload): string {
+  if (typeof prompt === "string") {
+    return prompt;
+  }
+  if (prompt && typeof prompt === "object" && "text" in prompt) {
+    const value = (prompt as { text?: unknown }).text;
+    if (typeof value === "string") {
+      return value;
+    }
+  }
+  return "";
+}
+
 async function handleResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const text = await response.text();
@@ -92,24 +120,17 @@ export async function uploadResume(file: File): Promise<ResumeParseResponse> {
   return handleResponse<ResumeParseResponse>(response);
 }
 
-type StartInterviewPayload = {
-  resume_summary: string;
-  job_description: string;
-  interviewer_style: string;
-  question_count: number;
-  user_id: string;
-  user_name?: string;
-  language: LanguageCode;
-};
-
-export async function startInterview(payload: StartInterviewPayload): Promise<{ session_id: string; prompt: InterviewPrompt }>
-{
+export async function startInterview(payload: StartInterviewPayload): Promise<{ session_id: string; prompt: string }> {
   const response = await fetch(`${API_BASE_URL}/interview/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  return handleResponse(response);
+  const data = await handleResponse<StartInterviewResponse>(response);
+  return {
+    session_id: data.session_id,
+    prompt: extractPromptText(data.prompt),
+  };
 }
 
 export type SendAnswerPayload = {
@@ -124,102 +145,13 @@ export async function sendInterviewAnswer(payload: SendAnswerPayload): Promise<I
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  return handleResponse(response);
-}
-
-export function sendInterviewAnswerStream(
-  payload: SendAnswerPayload,
-  handlers: {
-    onChunk: (content: string) => void;
-    onComplete: (response: InterviewResponse) => void;
-    onError: (error: Error) => void;
-  },
-): () => void {
-  const { onChunk, onComplete, onError } = handlers;
-  const controller = new AbortController();
-
-  const safeOnError = (error: Error) => {
-    if (typeof onError === 'function') {
-      onError(error);
-    } else {
-      console.error('onError is not a function:', error);
-    }
+  const data = await handleResponse<RawInterviewResponse>(response);
+  const prompt = extractPromptText(data.prompt);
+  return {
+    completed: data.completed,
+    prompt: prompt || null,
+    feedback: data.feedback ?? null,
   };
-
-  fetch(`${API_BASE_URL}/interview/respond-stream`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    signal: controller.signal,
-  })
-    .then((response) => {
-      if (!response.ok || !response.body) {
-        throw new Error(response.statusText || "Stream request failed");
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let finished = false;
-
-      const process = (): void => {
-        reader
-          .read()
-          .then(({ value, done }) => {
-            if (done || finished) {
-              return;
-            }
-
-            buffer += decoder.decode(value, { stream: true }).replace(/\r/g, "");
-            let separator = buffer.indexOf("\n\n");
-            while (separator !== -1) {
-              const rawEvent = buffer.slice(0, separator);
-              buffer = buffer.slice(separator + 2);
-              const payloadLines = rawEvent.split("\n").filter(Boolean);
-              let dataPayload = "";
-              for (const line of payloadLines) {
-                if (line.startsWith("data:")) {
-                  dataPayload += line.slice(5).trim();
-                }
-              }
-              if (dataPayload) {
-                try {
-                  const parsed = JSON.parse(dataPayload);
-                  if (parsed.content) {
-                    onChunk(parsed.content as string);
-                  }
-                  if (parsed.completed) {
-                    finished = true;
-                    onComplete(parsed.response as InterviewResponse);
-                    controller.abort();
-                    return;
-                  }
-                } catch (error) {
-                  finished = true;
-                  controller.abort();
-                  safeOnError(error instanceof Error ? error : new Error(String(error)));
-                  return;
-                }
-              }
-              separator = buffer.indexOf("\n\n");
-            }
-
-            if (!finished) {
-              process();
-            }
-          })
-          .catch((error) => {
-            safeOnError(error instanceof Error ? error : new Error(String(error)));
-          });
-      };
-
-      process();
-    })
-    .catch((error) => {
-      safeOnError(error instanceof Error ? error : new Error(String(error)));
-    });
-
-  return () => controller.abort();
 }
 
 export async function endInterview(sessionId: string): Promise<InterviewResponse> {
@@ -240,5 +172,3 @@ export async function fetchSessionDetail(sessionId: string): Promise<InterviewSe
   const response = await fetch(`${API_BASE_URL}/interview/session/${sessionId}`);
   return handleResponse(response);
 }
-
-

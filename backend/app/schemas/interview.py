@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 LanguageCode = Literal["en", "zh"]
@@ -27,13 +27,22 @@ class QuestionGenerationResponse(BaseModel):
 
 
 class InterviewStartRequest(BaseModel):
+    user_id: str
     resume_summary: str
     job_description: str
     interviewer_style: str = "general"
-    question_count: int = Field(default=5, ge=1, le=15)
-    user_id: str
-    user_name: str | None = None
+    question_count: int = Field(default=6, ge=1, le=15)
     language: LanguageCode = "en"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _ensure_backward_compatibility(cls, values):
+        if isinstance(values, dict):
+            if "resume_summary" not in values and "resume" in values:
+                values["resume_summary"] = values.pop("resume")
+            if "job_description" not in values and "target_role" in values:
+                values["job_description"] = values.pop("target_role")
+        return values
 
 
 class InterviewPrompt(BaseModel):
@@ -45,7 +54,7 @@ class InterviewPrompt(BaseModel):
 
 class InterviewStartResponse(BaseModel):
     session_id: str
-    prompt: InterviewPrompt
+    prompt: str
 
 
 class InterviewResponseRequest(BaseModel):
@@ -73,7 +82,7 @@ class InterviewFeedback(BaseModel):
 
 class InterviewResponse(BaseModel):
     completed: bool
-    prompt: InterviewPrompt | None = None
+    prompt: str | None = None
     feedback: InterviewFeedback | None = None
 
 
