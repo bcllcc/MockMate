@@ -11,7 +11,10 @@
     "setup": "npm run install:backend && npm run install:frontend"
   },
   "devDependencies": {
-    "concurrently": "^8.2.0"
+    "abort-controller": "^3.0.0",
+    "concurrently": "^8.2.0",
+    "node-fetch": "^3.3.2",
+    "web-streams-polyfill": "^4.2.0"
   },
   "repository": {
     "type": "git",

@@ -1,6 +1,21 @@
 # MockMate
 
-MockMate is an AI-powered interview simulator. Candidates upload their resume, choose a target role, and practice with an adaptive interviewer that provides instant, LLM-generated questions, follow-ups, and feedback.
+MockMate is an AI-powered interview simulator with **real-time streaming responses**. Candidates upload their resume, choose a target role, and practice with an adaptive interviewer that provides instant, LLM-generated questions with typewriter effects, intelligent follow-ups, and comprehensive feedback.
+
+## ✨ Key Features
+
+- 🎯 **Real-time Streaming**: AI responses stream character-by-character with typewriter effects
+- 📄 **Resume Analysis**: Intelligent parsing and analysis of uploaded resumes
+- 🤖 **Adaptive Interviewing**: Dynamic question generation based on conversation history
+- 🌐 **Bilingual Support**: Full English/中文 interface
+- 📊 **Comprehensive Feedback**: Detailed strengths, weaknesses, and improvement suggestions
+- 💾 **Session History**: Persistent storage and review of past interviews
+
+## 📚 Documentation
+
+- **[Streaming Implementation Guide](./STREAMING_IMPLEMENTATION_GUIDE.md)** - Complete technical guide for implementing streaming functionality
+- **[Architecture Overview](./STREAMING_ARCHITECTURE.md)** - System design and component interactions
+- **[Quick Setup Checklist](./STREAMING_CHECKLIST.md)** - Step-by-step verification and troubleshooting
 
 ## Project structure
 

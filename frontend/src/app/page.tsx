@@ -12,6 +12,7 @@ import {
   sendInterviewAnswer,
   sendInterviewAnswerStream,
   startInterview,
+  startInterviewStream,
   type InterviewFeedback,
   type ResumeParseResponse,
 } from "@/lib/api";
@@ -69,8 +70,14 @@ export default function HomePage() {
     }
     setIsProcessing(true);
     setErrorMessage(null);
+    setHistory([]);
+    setFeedback(null);
+    setCurrentQuestion(null);
+    setStreamingQuestion("");
+    setIsStreamingQuestion(true);
+
     try {
-      const response = await startInterview({
+      const streamIterator = await startInterviewStream({
         user_id: userId,
         resume_summary: resume.summary.summary,
         job_description: jobDescription,
@@ -78,18 +85,92 @@ export default function HomePage() {
         question_count: questionCount,
         language,
       });
-      setSessionId(response.session_id);
-      setCurrentQuestion(response.prompt ?? null);
-      setStreamingQuestion(response.prompt ?? "");
-      setIsStreamingQuestion(false);
-      setHistory([]);
-      setFeedback(null);
+
+      let currentSessionId: string | null = null;
+      let latestQuestion = "";
+
+      for await (const event of streamIterator) {
+        switch (event.type) {
+          case "session_started": {
+            const sessionIdFromEvent =
+              event.data && typeof event.data === "object" && "session_id" in event.data
+                ? String(event.data.session_id ?? "")
+                : "";
+            if (sessionIdFromEvent) {
+              currentSessionId = sessionIdFromEvent;
+              setSessionId(sessionIdFromEvent);
+            }
+            break;
+          }
+          case "question_chunk": {
+            const chunk =
+              event.data && typeof event.data === "object" && "content" in event.data
+                ? String(event.data.content ?? "")
+                : "";
+            if (chunk) {
+              latestQuestion += chunk;
+              setStreamingQuestion((prev) => prev + chunk);
+            }
+            break;
+          }
+          case "question_complete": {
+            const total =
+              event.data && typeof event.data === "object" && "total_content" in event.data
+                ? String(event.data.total_content ?? "")
+                : latestQuestion;
+            latestQuestion = total;
+            setStreamingQuestion(total);
+            setCurrentQuestion(total || null);
+            setIsStreamingQuestion(false);
+            break;
+          }
+          case "error": {
+            const message =
+              event.data && typeof event.data === "object" && "message" in event.data
+                ? String(event.data.message ?? "")
+                : t("home.errors.startFailed");
+            throw new Error(message || t("home.errors.startFailed"));
+          }
+          default:
+            break;
+        }
+      }
+
+      if (currentSessionId && latestQuestion) {
+        setSessionId(currentSessionId);
+        setCurrentQuestion(latestQuestion);
+        setStreamingQuestion(latestQuestion);
+        setIsStreamingQuestion(false);
+      }
     } catch (error) {
-      const message = error instanceof Error ? error.message : t("home.errors.startFailed");
-      setErrorMessage(message || t("home.errors.startFailed"));
-    } finally {
-      setIsProcessing(false);
+      try {
+        const response = await startInterview({
+          user_id: userId,
+          resume_summary: resume.summary.summary,
+          job_description: jobDescription,
+          interviewer_style: interviewerStyle,
+          question_count: questionCount,
+          language,
+        });
+        setSessionId(response.session_id);
+        setCurrentQuestion(response.prompt ?? null);
+        setStreamingQuestion(response.prompt ?? "");
+        setIsStreamingQuestion(false);
+        setErrorMessage(null);
+      } catch (fallbackError) {
+        const message = fallbackError instanceof Error ? fallbackError.message : t("home.errors.startFailed");
+        setErrorMessage(message || t("home.errors.startFailed"));
+        setSessionId(null);
+        setCurrentQuestion(null);
+        setStreamingQuestion("");
+      } finally {
+        setIsStreamingQuestion(false);
+        setIsProcessing(false);
+      }
+      return;
     }
+
+    setIsProcessing(false);
   };
 
   const handleQuestionStreamComplete = () => {
