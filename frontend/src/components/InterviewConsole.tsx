@@ -2,42 +2,54 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { StreamingMessage } from "./StreamingMessage";
 import { useLanguage } from "@/contexts/LanguageContext";
 import type { InterviewFeedback } from "@/lib/api";
 
 export interface ConversationEntry {
   role: "interviewer" | "candidate";
   content: string;
+  isStreaming?: boolean;
 }
 
 interface InterviewConsoleProps {
   sessionId: string | null;
   currentQuestion: string | null;
+  streamingQuestion: string;
+  isStreamingQuestion: boolean;
   history: ConversationEntry[];
   feedback: InterviewFeedback | null;
   onSubmit: (answer: string) => Promise<void>;
   onFinishEarly: () => Promise<void>;
+  onStreamComplete?: () => void;
   processing: boolean;
 }
 
 export function InterviewConsole({
   sessionId,
   currentQuestion,
+  streamingQuestion,
+  isStreamingQuestion,
   history,
   feedback,
   onSubmit,
   onFinishEarly,
+  onStreamComplete,
   processing,
 }: InterviewConsoleProps) {
   const { t } = useLanguage();
   const [answer, setAnswer] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
 
+  const displayQuestion = isStreamingQuestion ? streamingQuestion : currentQuestion ?? streamingQuestion;
+  const showQuestionBubble = Boolean(sessionId && (isStreamingQuestion || displayQuestion.length > 0));
+  const inputDisabled = !sessionId || processing || isStreamingQuestion;
+
   useEffect(() => {
     if (listRef.current) {
       listRef.current.scrollTop = listRef.current.scrollHeight;
     }
-  }, [history, currentQuestion]);
+  }, [history, currentQuestion, streamingQuestion, isStreamingQuestion]);
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -58,7 +70,7 @@ export function InterviewConsole({
       </div>
 
       <div ref={listRef} className="flex-1 space-y-4 overflow-y-auto px-6 py-6">
-        {history.length === 0 && !currentQuestion && (
+        {history.length === 0 && !currentQuestion && !isStreamingQuestion && (
           <p className="text-sm text-slate-500">{t("console.emptyState")}</p>
         )}
 
@@ -74,10 +86,15 @@ export function InterviewConsole({
           </div>
         ))}
 
-        {currentQuestion && sessionId && (
+        {showQuestionBubble && (
           <div className="flex justify-start">
             <div className="max-w-[80%] rounded-lg bg-slate-900 px-4 py-3 text-sm text-white shadow">
-              <p>{currentQuestion}</p>
+              <StreamingMessage
+                content={displayQuestion}
+                isStreaming={isStreamingQuestion}
+                onStreamComplete={onStreamComplete}
+                className="w-full"
+              />
             </div>
           </div>
         )}
@@ -128,21 +145,21 @@ export function InterviewConsole({
             placeholder={sessionId ? t("console.inputPlaceholder") : t("console.inputPlaceholderDisabled")}
             rows={3}
             className="w-full resize-none rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-primary-500 focus:outline-none"
-            disabled={!sessionId || processing}
+            disabled={inputDisabled}
           />
           <div className="mt-3 flex items-center justify-between">
             <button
               type="button"
               onClick={onFinishEarly}
               className="text-sm font-medium text-slate-500 hover:text-slate-700"
-              disabled={!sessionId || processing}
+              disabled={inputDisabled}
             >
               {t("console.endButton")}
             </button>
             <button
               type="submit"
               className="rounded-md bg-primary-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-primary-700 disabled:cursor-not-allowed disabled:bg-slate-300"
-              disabled={!sessionId || processing || answer.trim().length === 0}
+              disabled={inputDisabled || answer.trim().length === 0}
             >
               {processing ? t("console.submitting") : t("console.submitButton")}
             </button>

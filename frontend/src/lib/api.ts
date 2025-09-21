@@ -89,6 +89,11 @@ type RawInterviewResponse = {
   feedback?: InterviewFeedback | null;
 };
 
+export type StreamEvent = {
+  type: "question_chunk" | "question_complete" | "interview_complete" | "error";
+  data: any;
+};
+
 function extractPromptText(prompt: PromptPayload): string {
   if (typeof prompt === "string") {
     return prompt;
@@ -154,6 +159,143 @@ export async function sendInterviewAnswer(payload: SendAnswerPayload): Promise<I
   };
 }
 
+export async function sendInterviewAnswerStream(payload: SendAnswerPayload): Promise<AsyncGenerator<StreamEvent, void, unknown>> {
+  const controller = new AbortController();
+
+  const response = await fetch(`${API_BASE_URL}/interview/respond-stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal: controller.signal,
+  });
+
+  if (!response.ok) {
+    controller.abort();
+    const text = await response.text();
+    throw new Error(text || response.statusText);
+  }
+
+  if (!response.body) {
+    controller.abort();
+    throw new Error("Streaming not supported in this environment.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  const allowedTypes = new Set<StreamEvent["type"]>([
+    "question_chunk",
+    "question_complete",
+    "interview_complete",
+    "error",
+  ]);
+
+  const collectEvents = (): { events: StreamEvent[]; done: boolean } => {
+    const events: StreamEvent[] = [];
+    let done = false;
+
+    while (true) {
+      const delimiterIndex = buffer.indexOf("\n\n");
+      if (delimiterIndex === -1) {
+        break;
+      }
+
+      const rawEvent = buffer.slice(0, delimiterIndex).trim();
+      buffer = buffer.slice(delimiterIndex + 2);
+
+      if (!rawEvent || !rawEvent.startsWith("data:")) {
+        continue;
+      }
+
+      const dataStr = rawEvent.slice(5).trim();
+      if (!dataStr) {
+        continue;
+      }
+
+      if (dataStr === "[DONE]") {
+        done = true;
+        break;
+      }
+
+      try {
+        const parsed = JSON.parse(dataStr) as { type?: string; data?: any };
+        const eventType = parsed?.type;
+        if (eventType && allowedTypes.has(eventType as StreamEvent["type"])) {
+          events.push({
+            type: eventType as StreamEvent["type"],
+            data: parsed.data,
+          });
+        } else {
+          events.push({
+            type: "error",
+            data: {
+              message: "Unknown stream event type",
+              raw: parsed,
+            },
+          });
+        }
+      } catch (err) {
+        events.push({
+          type: "error",
+          data: {
+            message: "Failed to parse stream event",
+            raw: dataStr,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        });
+      }
+    }
+
+    return { events, done };
+  };
+
+  const iterator = (async function* (): AsyncGenerator<StreamEvent, void, unknown> {
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+
+        if (value) {
+          buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+        }
+
+        const { events, done: shouldStop } = collectEvents();
+        for (const event of events) {
+          yield event;
+        }
+        if (shouldStop) {
+          return;
+        }
+
+        if (done) {
+          buffer += decoder.decode().replace(/\r\n/g, "\n");
+          const final = collectEvents();
+          for (const event of final.events) {
+            yield event;
+          }
+          return;
+        }
+      }
+    } catch (error) {
+      yield {
+        type: "error",
+        data: {
+          message: error instanceof Error ? error.message : String(error),
+        },
+      };
+      return;
+    } finally {
+      try {
+        await reader.cancel();
+      } catch {
+        // ignore cancellation errors
+      }
+      controller.abort();
+    }
+  })();
+
+  return iterator;
+}
+
 export async function endInterview(sessionId: string): Promise<InterviewResponse> {
   const response = await fetch(`${API_BASE_URL}/interview/end`, {
     method: "POST",
@@ -172,3 +314,4 @@ export async function fetchSessionDetail(sessionId: string): Promise<InterviewSe
   const response = await fetch(`${API_BASE_URL}/interview/session/${sessionId}`);
   return handleResponse(response);
 }
+

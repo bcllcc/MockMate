@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
 
 from app.core.database import SessionLocal
 from app.schemas import (
@@ -84,6 +88,137 @@ def respond_interview(payload: InterviewResponseRequest) -> InterviewResponse:
 
 
 
+
+@router.post("/interview/respond-stream")
+async def respond_interview_stream(payload: InterviewResponseRequest) -> StreamingResponse:
+    """流式响应面试回答，返回Server-Sent Events格式数据"""
+
+    def _serialize_event(event_type: str, data: dict) -> str:
+        return f"data: {json.dumps({'type': event_type, 'data': data}, ensure_ascii=False)}\n\n"
+
+    async def generate_stream():
+        has_error = False
+
+        # Check for session errors first
+        try:
+            with SessionLocal() as db:
+                session = _interview_manager._get_session(db, payload.session_id)
+                if session is None:
+                    yield _serialize_event('error', {'message': 'Session not found'})
+                    has_error = True
+                elif session.completed:
+                    yield _serialize_event('error', {'message': 'Interview already completed'})
+                    has_error = True
+                else:
+                    current_prompt = session.current_prompt or {}
+                    if not current_prompt:
+                        yield _serialize_event('error', {'message': 'No active interview question'})
+                        has_error = True
+        except Exception as e:
+            _llm_service._logger.error(f"Database session error: {e}")
+            yield _serialize_event('error', {'message': 'Database error occurred'})
+            has_error = True
+
+        # Only proceed with main logic if no errors
+        if not has_error:
+            try:
+                with SessionLocal() as db:
+                    session = _interview_manager._get_session(db, payload.session_id)
+                    current_prompt = session.current_prompt or {}
+                    sequence = session.turn_count + 1
+
+                    _interview_manager._record_turn(
+                        db=db,
+                        session_id=session.session_id,
+                        sequence=sequence,
+                        question=current_prompt.get('text', ''),
+                        question_type=current_prompt.get('type', 'main'),
+                        topic=current_prompt.get('topic', 'general'),
+                        answer=payload.answer,
+                        elapsed_seconds=payload.elapsed_seconds,
+                    )
+
+                    session.turn_count = sequence
+                    questions = list(session.questions or [])
+                    questions.append({
+                        'id': current_prompt.get('id'),
+                        'text': current_prompt.get('text'),
+                        'topic': current_prompt.get('topic', 'general'),
+                        'type': current_prompt.get('type', 'main'),
+                        'sequence': sequence,
+                    })
+                    session.questions = questions
+
+                    target_count = session.next_index or 0
+                    if target_count and session.turn_count >= target_count:
+                        turns = _interview_manager._fetch_turns(db, session.session_id)
+                        history = _interview_manager._build_llm_history(turns)
+                        final_feedback = _llm_service.generate_final_feedback(
+                            history,
+                            session.resume_summary,
+                            session.job_description,
+                            session.language,
+                        )
+                        session.completed = True
+                        session.completed_at = datetime.utcnow()
+                        session.feedback = final_feedback
+                        session.current_prompt = None
+                        db.commit()
+
+                        yield _serialize_event('interview_complete', {
+                            'completed': True,
+                            'feedback': final_feedback,
+                        })
+                    else:
+                        turns = _interview_manager._fetch_turns(db, session.session_id)
+                        history = _interview_manager._build_llm_history(turns)
+
+                        accumulated_question = ''
+                        async for chunk in _llm_service.generate_follow_up_question_stream(
+                            history,
+                            session.resume_summary,
+                            session.job_description,
+                            session.language,
+                        ):
+                            accumulated_question += chunk
+                            yield _serialize_event('question_chunk', {
+                                'content': chunk,
+                                'finished': False,
+                            })
+                            await asyncio.sleep(0.05)
+
+                        next_prompt = {
+                            'id': uuid.uuid4().hex,
+                            'text': accumulated_question.strip(),
+                            'topic': 'general',
+                            'type': 'follow_up',
+                            'style': session.interviewer_style,
+                        }
+                        session.current_prompt = next_prompt
+                        db.commit()
+
+                        yield _serialize_event('question_complete', {
+                            'session_id': payload.session_id,
+                            'completed': False,
+                            'total_content': accumulated_question.strip(),
+                        })
+            except Exception as e:
+                _llm_service._logger.error(f"Stream processing error: {e}")
+                yield _serialize_event('error', {'message': str(e)})
+
+        # Always send the DONE marker - this is the critical fix
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        generate_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Cache-Control",
+        },
+    )
 
 @router.post("/interview/end", response_model=InterviewResponse)
 def end_interview(payload: InterviewEndRequest) -> InterviewResponse:

@@ -5,8 +5,9 @@ import json
 import os
 from pathlib import Path
 import uuid
+from datetime import datetime
 from textwrap import dedent
-from typing import Iterable, Generator
+from typing import AsyncGenerator, Iterable, Generator
 
 from fastapi import HTTPException
 
@@ -86,6 +87,32 @@ Generate a concise, professional opening question that helps the interviewer und
             else:
                 return "Could you please introduce yourself and tell me about your relevant work experience?"
 
+    async def generate_first_question_stream(self, resume_text: str, target_role: str, language: str = "en") -> AsyncGenerator[str, None]:
+        """流式生成第一个面试问题"""
+        if language == "zh":
+            prompt = f"""基于简历和目标职位，生成一个开场面试问题。
+
+简历：{resume_text}
+目标职位：{target_role}
+
+请生成一个简洁、专业的开场问题，帮助面试官了解候选人的背景和经验。"""
+        else:
+            prompt = f"""Based on the resume and target role, generate an opening interview question.
+
+Resume: {resume_text}
+Target Role: {target_role}
+
+Generate a concise, professional opening question that helps the interviewer understand the candidate's background and experience."""
+
+        try:
+            async for chunk in self._chat_stream([{"role": "user", "content": prompt}]):
+                yield chunk
+        except Exception as e:
+            self._logger.error(f"Failed to generate first question stream: {e}")
+            fallback = "请简单介绍一下你自己以及你的相关工作经验。" if language == "zh" else "Could you please introduce yourself and tell me about your relevant work experience?"
+            for char in fallback:
+                yield char
+
     def generate_follow_up_question(self, history: list, resume_text: str, target_role: str, language: str = "en") -> str:
         """基于对话历史生成后续问题"""
         conversation = "\n".join([f"{turn['role']}: {turn['content']}" for turn in history])
@@ -120,6 +147,40 @@ Generate a follow-up question that digs deeper based on the candidate's previous
                 return "请详细说明一下您在这个项目中遇到的挑战以及如何解决的？"
             else:
                 return "Can you elaborate on the challenges you faced in this project and how you overcame them?"
+
+    async def generate_follow_up_question_stream(self, history: list, resume_text: str, target_role: str, language: str = "en") -> AsyncGenerator[str, None]:
+        """流式生成后续面试问题"""
+        conversation = "\n".join([f"{turn['role']}: {turn['content']}" for turn in history])
+
+        if language == "zh":
+            prompt = f"""基于以下面试对话历史、简历和目标职位，生成下一个合适的面试问题。
+
+对话历史：
+{conversation}
+
+简历：{resume_text}
+目标职位：{target_role}
+
+请生成一个深入探讨的后续问题，基于候选人之前的回答。"""
+        else:
+            prompt = f"""Based on the interview conversation history, resume, and target role, generate the next appropriate interview question.
+
+Conversation History:
+{conversation}
+
+Resume: {resume_text}
+Target Role: {target_role}
+
+Generate a follow-up question that digs deeper based on the candidate's previous answers."""
+
+        try:
+            async for chunk in self._chat_stream([{"role": "user", "content": prompt}]):
+                yield chunk
+        except Exception as e:
+            self._logger.error(f"Failed to generate follow-up question stream: {e}")
+            fallback = "请详细说明一下您在这个项目中遇到的挑战以及如何解决的？" if language == "zh" else "Can you elaborate on the challenges you faced in this project and how you overcame them?"
+            for char in fallback:
+                yield char
 
     def generate_feedback(self, answer_text: str, resume_text: str, target_role: str, language: str = "en") -> dict:
         """生成对单个回答的反馈"""
@@ -302,6 +363,31 @@ Return analysis in JSON format with:
             "details": details or {}
         }
         self._logger.info(f"LLM Event: {json.dumps(log_data)}")
+
+    async def _chat_stream(self, messages: list, **kwargs) -> AsyncGenerator[str, None]:
+        """流式调用LLM，返回异步生成器"""
+        try:
+            self._log_event("chat_stream_request", {
+                "message_count": len(messages),
+                "model": self._model
+            })
+
+            stream = self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=2000,
+                stream=True,
+                **kwargs
+            )
+
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+
+        except Exception as e:
+            self._log_event("chat_stream_error", {"error": str(e)})
+            raise
 
     def _chat(self, messages: list, **kwargs) -> str:
         """调用LLM进行对话"""
