@@ -101,7 +101,7 @@ export function InterviewConsole({
       </div>
 
       {feedback ? (
-        <div className="border-t border-slate-100 bg-slate-50 px-6 py-6">
+        <div className="border-t border-slate-100 bg-slate-50 px-6 py-6 max-h-96 overflow-y-auto">
           <h3 className="text-base font-semibold text-slate-900">{t("console.feedbackTitle")}</h3>
           <p className="mt-2 text-sm text-slate-600">{feedback.summary}</p>
           <div className="mt-4 grid gap-4 md:grid-cols-3">
