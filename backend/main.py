@@ -23,6 +23,12 @@ def on_startup() -> None:
     Base.metadata.create_all(bind=engine)
 
 
+@app.on_event("shutdown") 
+def on_shutdown() -> None:
+    """Cleanup resources on application shutdown"""
+    engine.dispose()
+
+
 app.include_router(api_router, prefix="/api")
 
 
